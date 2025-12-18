@@ -1,0 +1,29 @@
+{
+  "name": "ztag-platform",
+  "version": "1.0.0",
+  "description": "Zero-Trust API Gateway & Policy Engine",
+  "private": true,
+  "scripts": {
+    "build": "pnpm -r build",
+    "dev": "pnpm -r dev",
+    "test": "pnpm -r test",
+    "lint": "pnpm -r lint",
+    "clean": "pnpm -r clean",
+    "install:all": "pnpm install",
+    "db:migrate": "pnpm --filter @ztag/policy-engine db:migrate",
+    "db:seed": "pnpm --filter @ztag/policy-engine db:seed"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0",
+    "prettier": "^3.0.0",
+    "eslint": "^8.0.0",
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "@typescript-eslint/parser": "^6.0.0",
+    "turbo": "^1.10.0"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "pnpm": ">=8.0.0"
+  }
+}

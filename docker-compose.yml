@@ -1,0 +1,120 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: ztag-postgres
+    environment:
+      POSTGRES_DB: ztag_db
+      POSTGRES_USER: ztag
+      POSTGRES_PASSWORD: ztag123
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ztag"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: ztag-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  policy-engine:
+    build:
+      context: .
+      dockerfile: infra/docker/policy-engine.Dockerfile
+    container_name: ztag-policy-engine
+    environment:
+      - DATABASE_URL=postgresql://ztag:ztag123@postgres:5432/ztag_db
+      - REDIS_URL=redis://redis:6379
+      - JWT_SECRET=super-secret-jwt-key-change-in-production
+      - POLICY_ENGINE_PORT=3002
+      - NODE_ENV=development
+    ports:
+      - "3002:3002"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./apps/policy-engine:/app
+      - /app/node_modules
+
+  gateway:
+    build:
+      context: .
+      dockerfile: infra/docker/gateway.Dockerfile
+    container_name: ztag-gateway
+    environment:
+      - DATABASE_URL=postgresql://ztag:ztag123@postgres:5432/ztag_db
+      - REDIS_URL=redis://redis:6379
+      - JWT_SECRET=super-secret-jwt-key-change-in-production
+      - GATEWAY_PORT=3001
+      - POLICY_ENGINE_URL=http://policy-engine:3002
+      - ECHO_SERVICE_URL=http://echo-service:7070
+      - NODE_ENV=development
+    ports:
+      - "3001:3001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      policy-engine:
+        condition: service_started
+    volumes:
+      - ./apps/gateway:/app
+      - /app/node_modules
+
+  control-plane:
+    build:
+      context: .
+      dockerfile: infra/docker/control-plane.Dockerfile
+    container_name: ztag-control-plane
+    environment:
+      - DATABASE_URL=postgresql://ztag:ztag123@postgres:5432/ztag_db
+      - POLICY_ENGINE_URL=http://policy-engine:3002
+      - JWT_SECRET=super-secret-jwt-key-change-in-production
+      - CONTROL_PLANE_PORT=3000
+      - NODE_ENV=development
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      policy-engine:
+        condition: service_started
+    volumes:
+      - ./apps/control-plane:/app
+      - /app/node_modules
+
+  echo-service:
+    build:
+      context: .
+      dockerfile: infra/docker/echo-service.Dockerfile
+    container_name: ztag-echo-service
+    environment:
+      - ECHO_SERVICE_PORT=7070
+      - NODE_ENV=development
+    ports:
+      - "7070:7070"
+    volumes:
+      - ./apps/echo-service:/app
+      - /app/node_modules
+
+volumes:
+  postgres_data:
+  redis_data:
