@@ -5,9 +5,8 @@
 import { JWTClaimsSchema } from './types';
 import type { 
   JWTClaims, 
-  PolicyCondition,
-  PolicyRule
-} from './types';
+  PolicyCondition
+} from './types'; // Removed PolicyRule
 
 // JWT Token Utilities
 export class JWTUtils {
@@ -16,6 +15,8 @@ export class JWTUtils {
   }
 
   static isExpired(claims: JWTClaims): boolean {
+    // Note: jsonwebtoken.verify usually handles exp automatically,
+    // but this explicit check can be useful for pre-validation or custom logic.
     return Date.now() / 1000 > claims.exp;
   }
 
@@ -39,97 +40,85 @@ export class PolicyEvaluator {
     const { field, operator, value } = condition;
     const fieldValue = this.getNestedValue(subject, field);
 
+    // Handle cases where fieldValue is undefined or null early for certain operators
+    if (fieldValue === undefined || fieldValue === null) {
+      return operator === 'neq' || operator === 'not_in';
+    }
+
     switch (operator) {
-      case 'equals':
-        return fieldValue === value;
-      case 'not_equals':
-        return fieldValue !== value;
+      case 'eq':
+        // Use loose equality for flexibility in type comparison (e.g., string "1" == number 1)
+        return fieldValue == value;
+      case 'neq':
+        return fieldValue != value;
       case 'in':
+        // Check if fieldValue is present in the 'value' array
         return Array.isArray(value) && value.includes(fieldValue);
       case 'not_in':
+        // Check if fieldValue is NOT present in the 'value' array
         return Array.isArray(value) && !value.includes(fieldValue);
       case 'contains':
-        return Array.isArray(fieldValue) && value && fieldValue.includes(value);
-      case 'exists':
-        return fieldValue !== undefined && fieldValue !== null;
-      case 'not_exists':
-        return fieldValue === undefined || fieldValue === null;
+        // Check if fieldValue (array) contains 'value'
+        return Array.isArray(fieldValue) && fieldValue.includes(value);
+      case 'starts_with':
+        return typeof fieldValue === 'string' && typeof value === 'string' && fieldValue.startsWith(value);
+      case 'ends_with':
+        return typeof fieldValue === 'string' && typeof value === 'string' && fieldValue.endsWith(value);
+      case 'gt':
+        return typeof fieldValue === 'number' && typeof value === 'number' && fieldValue > value;
+      case 'lt':
+        return typeof fieldValue === 'number' && typeof value === 'number' && fieldValue < value;
+      case 'gte':
+        return typeof fieldValue === 'number' && typeof value === 'number' && fieldValue >= value;
+      case 'lte':
+        return typeof fieldValue === 'number' && typeof value === 'number' && fieldValue <= value;
       default:
         return false;
     }
   }
 
-  static evaluateRule(subject: any, rule: PolicyRule): boolean {
-    if (rule.conditions.length === 0) {
-      return true;
-    }
-
-    const allConditionsMatch = rule.conditions.every(condition => 
-      this.evaluateCondition(subject, condition)
-    );
-
-    return allConditionsMatch;
-  }
+  // evaluateRule is moved to policy-engine as it depends on policy structure
 
   static getNestedValue(obj: any, path: string): any {
-    return path.split('.').reduce((current, key) => current?.[key], obj);
+    return path.split('.').reduce((current, key) => (current ? current[key] : undefined), obj);
   }
 
   static matchPath(pattern: string, path: string): boolean {
-    // Convert glob pattern to regex
+    // Handle exact match for root
+    if (pattern === '/' && path === '/') return true;
+
+    // Convert glob pattern to regex:
+    // * matches any characters except / (within a segment)
+    // ? matches any single character except / (within a segment)
     const regexPattern = pattern
-      .replace(/\*/g, '.*')
-      .replace(/\?/g, '.')
-      .replace(/\//g, '\\/');
+      .replace(/\./g, '\\.') // Escape dots
+      .replace(/\//g, '\\/') // Escape slashes
+      .replace(/\*\*/g, '.*') // Support ** for matching across segments (if needed, but for now * means one segment)
+      .replace(/\*/g, '[^/]*') // * matches any characters except /
+      .replace(/\?/g, '[^/]'); // ? matches any single character except /
     
+    // Ensure it matches the whole path
     const regex = new RegExp(`^${regexPattern}$`);
     return regex.test(path);
   }
 
   static matchMethod(methods: string[], requestMethod: string): boolean {
-    return methods.includes(requestMethod.toUpperCase());
-  }
-}
-
-// Path Matching Utilities
-export class PathMatcher {
-  static matches(pattern: string, path: string): boolean {
-    return PolicyEvaluator.matchPath(pattern, path);
-  }
-
-  static extractParams(pattern: string, path: string): Record<string, string> {
-    const params: Record<string, string> = {};
-    const patternParts = pattern.split('/');
-    const pathParts = path.split('/');
-
-    for (let i = 0; i < patternParts.length; i++) {
-      if (patternParts[i].startsWith(':')) {
-        const paramName = patternParts[i].substring(1);
-        params[paramName] = pathParts[i];
-      }
+    // If methods array contains '*', it matches any method
+    if (methods.includes('*')) {
+      return true;
     }
-
-    return params;
+    return methods.includes(requestMethod.toUpperCase());
   }
 }
 
 // Request ID Generator
 export class RequestIdGenerator {
   static generate(): string {
-    return `req_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    return `req_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`;
   }
 }
 
-// Rate Limit Key Generator
-export class RateLimitKeyGenerator {
-  static generate(subject: JWTClaims, obligation: any): string {
-    const baseKey = obligation.rateLimit?.key || 'default';
-    const tenant = subject.tenant || 'default';
-    const role = subject.role || 'default';
-    
-    return `rate_limit:${tenant}:${role}:${baseKey}`;
-  }
-}
+// Rate Limit Key Generator (moved to gateway service as it's specific)
 
 // Validation Utilities
 export class ValidationUtils {
@@ -153,46 +142,7 @@ export class ValidationUtils {
   }
 }
 
-// Logger Utilities
-export class LoggerUtils {
-  static createRequestLogger(requestId: string, method: string, path: string) {
-    return {
-      info: (message: string, meta?: any) => {
-        console.log(JSON.stringify({
-          level: 'info',
-          message,
-          requestId,
-          method,
-          path,
-          timestamp: new Date().toISOString(),
-          ...meta
-        }));
-      },
-      warn: (message: string, meta?: any) => {
-        console.warn(JSON.stringify({
-          level: 'warn',
-          message,
-          requestId,
-          method,
-          path,
-          timestamp: new Date().toISOString(),
-          ...meta
-        }));
-      },
-      error: (message: string, error?: any) => {
-        console.error(JSON.stringify({
-          level: 'error',
-          message,
-          requestId,
-          method,
-          path,
-          timestamp: new Date().toISOString(),
-          error: error?.message || error
-        }));
-      }
-    };
-  }
-}
+// Logger Utilities (moved to individual services)
 
 // Date/Time Utilities
 export class DateTimeUtils {
@@ -207,7 +157,8 @@ export class DateTimeUtils {
   static getWindowStart(windowSeconds: number): Date {
     const now = new Date();
     const windowMs = windowSeconds * 1000;
-    return new Date(now.getTime() - (now.getTime() % windowMs));
+    // Calculate start of the current window
+    return new Date(Math.floor(now.getTime() / windowMs) * windowMs);
   }
 
   static getResetTime(windowSeconds: number): string {
@@ -217,4 +168,4 @@ export class DateTimeUtils {
   }
 }
 
-export { JWTClaimsSchema } from './types';
+// Removed duplicate export { JWTClaimsSchema } from './types';

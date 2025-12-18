@@ -42,6 +42,14 @@ export const redis = {
     await client.del(key);
   },
 
+  async eval(script: string, keys: string[], args: (string | number)[]): Promise<any> {
+    const client = await this.getClient();
+    // In node_redis v4, eval takes an array of keys and an array of arguments
+    // The script itself defines how many keys (KEYS) vs arguments (ARGV) it expects
+    // The library handles mapping the keys and args arrays to Redis's KEYS and ARGV
+    return client.eval(script, { keys, arguments: args });
+  },
+
   async close(): Promise<void> {
     if (redisClient) {
       await redisClient.quit();

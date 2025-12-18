@@ -1,5 +1,6 @@
 import { Pool } from 'pg';
 import { config } from '../config';
+import { logger } from '../utils/logger';
 
 const pool = new Pool({
   connectionString: config.databaseUrl,
@@ -13,11 +14,10 @@ export const db = {
 
 export async function initializeDatabase(): Promise<void> {
   try {
-    // Test connection
     await db.query('SELECT NOW()');
-    console.log('Database connection established');
+    logger.info('Gateway Database connection established');
   } catch (error) {
-    console.error('Database connection failed:', error);
+    logger.error({ err: error }, 'Gateway Database connection failed');
     throw error;
   }
 }

@@ -1,10 +1,21 @@
 import { PolicyRepository } from '../database/PolicyRepository';
-import type { Policy, DecisionRequest, DecisionResponse } from '@ztag/shared';
+import type { Policy, DecisionRequest, DecisionResponse, PolicyCondition, PolicyRules } from '@ztag/shared';
+import { logger } from '../utils/logger';
 
+type EvaluationResult = 'ALLOW' | 'DENY' | 'SKIP';
+
+/**
+ * The core of the policy engine. It evaluates incoming requests against the policy set.
+ */
 export class PolicyService {
+  /**
+   * Main evaluation entry point.
+   * Orchestrates fetching policies and evaluating them in order.
+   */
   static async evaluate(request: DecisionRequest): Promise<DecisionResponse> {
+    logger.info({ requestId: request.context.requestId, resource: request.resource }, 'Starting policy evaluation');
+    
     try {
-      // Find matching policies
       const policies = await PolicyRepository.findMatchingPolicies(
         request.resource.service,
         request.resource.path,
@@ -12,104 +23,130 @@ export class PolicyService {
         request.context.tenant
       );
 
-      // If no policies match, default to DENY (zero-trust)
       if (policies.length === 0) {
-        return {
-          decision: 'DENY',
-          reason: 'No matching policy found - default deny',
-          obligations: {}
-        };
+        logger.warn({ requestId: request.context.requestId }, 'No matching policy found');
+        return { decision: 'DENY', reason: 'No matching policy found' };
       }
 
-      // Evaluate policies by priority (highest first)
+      logger.info({ requestId: request.context.requestId, count: policies.length }, 'Found candidate policies');
+
+      // Evaluate policies in order of priority
       for (const policy of policies) {
-        const decision = this.evaluatePolicy(request, policy);
+        const { result, reason } = this.evaluatePolicyRules(request, policy);
         
-        if (decision.decision !== 'SKIP') {
-          return decision;
-        }
-      }
-
-      // If all policies returned SKIP, deny by default
-      return {
-        decision: 'DENY',
-        reason: 'No policy condition matched',
-        obligations: {}
-      };
-    } catch (error) {
-      // In case of error, deny for security
-      return {
-        decision: 'DENY',
-        reason: `Policy evaluation error: ${error instanceof Error ? error.message : 'Unknown error'}`,
-        obligations: {}
-      };
-    }
-  }
-
-  private static evaluatePolicy(request: DecisionRequest, policy: Policy): DecisionResponse {
-    try {
-      // Evaluate each rule in the policy
-      for (const rule of policy.rules) {
-        const conditionsMatch = this.evaluateConditions(request, rule.conditions);
-        
-        if (conditionsMatch) {
+        if (result !== 'SKIP') {
+          logger.info({ requestId: request.context.requestId, policyId: policy.id, decision: result }, `Decision reached by policy: ${policy.name}`);
           return {
-            decision: rule.action.toUpperCase() as 'ALLOW' | 'DENY',
-            reason: `Policy "${policy.name}" matched - ${rule.action} by rule`,
+            decision: result,
+            reason: reason || `Decision by policy: ${policy.name}`,
             policyId: policy.id,
-            obligations: policy.obligations
+            obligations: policy.obligations || {},
           };
         }
       }
 
-      // No rule conditions matched
-      return {
-        decision: 'SKIP',
-        reason: 'Rule conditions not matched',
-        policyId: policy.id
-      };
+      logger.warn({ requestId: request.context.requestId }, 'All matching policies were inconclusive');
+      return { decision: 'DENY', reason: 'No policy rule produced an explicit decision' };
+
     } catch (error) {
+      logger.error({ requestId: request.context.requestId, error }, 'An error occurred during policy evaluation');
       return {
         decision: 'DENY',
         reason: `Policy evaluation error: ${error instanceof Error ? error.message : 'Unknown error'}`,
-        policyId: policy.id
       };
     }
   }
 
-  private static evaluateConditions(request: DecisionRequest, conditions: any[]): boolean {
-    if (conditions.length === 0) {
-      return true; // Empty conditions always match
+  /**
+   * Evaluates the 'denyIf' and 'allowIf' rules for a single policy.
+   * Deny rules are always evaluated first and take precedence.
+   */
+  private static evaluatePolicyRules(request: DecisionRequest, policy: Policy): { result: EvaluationResult, reason?: string } {
+    const { rules } = policy;
+
+    // 1. Check deny rules first
+    if (rules.denyIf && rules.denyIf.length > 0) {
+      if (this.anyConditionsMatch(request, rules.denyIf)) {
+        return { result: 'DENY', reason: `Denied by policy: ${policy.name}` };
+      }
     }
 
+    // 2. Check allow rules if no deny rule matched
+    if (rules.allowIf && rules.allowIf.length > 0) {
+      if (this.anyConditionsMatch(request, rules.allowIf)) {
+        return { result: 'ALLOW', reason: `Allowed by policy: ${policy.name}` };
+      }
+    }
+    
+    // 3. If no rules produced a decision, skip to the next policy
+    return { result: 'SKIP' };
+  }
+  
+  /**
+   * Checks if any set of conditions in a list matches the request.
+   * Used for 'allowIf' and 'denyIf' which can be arrays of condition sets.
+   */
+  private static anyConditionsMatch(request: DecisionRequest, conditionSets: PolicyCondition[]): boolean {
+    // In our simplified model, we treat this as a single set of AND conditions.
+    // For a more complex engine, this could be an array of arrays (OR of ANDs).
+    return this.allConditionsMatch(request, conditionSets);
+  }
+
+  /**
+   * Checks if all conditions in a given set match the request.
+   */
+  private static allConditionsMatch(request: DecisionRequest, conditions: PolicyCondition[]): boolean {
+    if (!conditions || conditions.length === 0) {
+      return true; // An empty rule set is considered a match
+    }
     return conditions.every(condition => this.evaluateCondition(request, condition));
   }
 
-  private static evaluateCondition(request: DecisionRequest, condition: any): boolean {
+  /**
+   * Evaluates a single condition against the request context.
+   */
+  private static evaluateCondition(request: DecisionRequest, condition: PolicyCondition): boolean {
     const { field, operator, value } = condition;
-    const fieldValue = this.getNestedValue(request, field);
+    const actualValue = this.getNestedValue(request, field);
+
+    if (actualValue === undefined || actualValue === null) {
+      return operator === 'neq' || operator === 'not_in';
+    }
 
     switch (operator) {
-      case 'equals':
-        return fieldValue === value;
-      case 'not_equals':
-        return fieldValue !== value;
+      case 'eq':
+        return actualValue == value;
+      case 'neq':
+        return actualValue != value;
       case 'in':
-        return Array.isArray(value) && value.includes(fieldValue);
+        return Array.isArray(value) && value.includes(actualValue);
       case 'not_in':
-        return Array.isArray(value) && !value.includes(fieldValue);
+        return Array.isArray(value) && !value.includes(actualValue);
       case 'contains':
-        return Array.isArray(fieldValue) && value && fieldValue.includes(value);
-      case 'exists':
-        return fieldValue !== undefined && fieldValue !== null;
-      case 'not_exists':
-        return fieldValue === undefined || fieldValue === null;
+        return Array.isArray(actualValue) && actualValue.includes(value);
+      case 'starts_with':
+        return typeof actualValue === 'string' && typeof value === 'string' && actualValue.startsWith(value);
+      case 'ends_with':
+        return typeof actualValue === 'string' && typeof value === 'string' && actualValue.endsWith(value);
+      case 'gt':
+        return typeof actualValue === 'number' && typeof value === 'number' && actualValue > value;
+      case 'lt':
+        return typeof actualValue === 'number' && typeof value === 'number' && actualValue < value;
+      case 'gte':
+        return typeof actualValue === 'number' && typeof value === 'number' && actualValue >= value;
+      case 'lte':
+        return typeof actualValue === 'number' && typeof value === 'number' && actualValue <= value;
       default:
+        logger.warn({ condition }, 'Unsupported operator in policy condition');
         return false;
     }
   }
 
+  /**
+   * Safely retrieves a nested value from an object based on a dot-notation path.
+   * e.g., getNestedValue(request, 'subject.role') -> request.subject.role
+   */
   private static getNestedValue(obj: any, path: string): any {
-    return path.split('.').reduce((current, key) => current?.[key], obj);
+    return path.split('.').reduce((current, key) => (current ? current[key] : undefined), obj);
   }
 }

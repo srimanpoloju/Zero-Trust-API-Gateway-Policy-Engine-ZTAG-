@@ -1,100 +1,83 @@
 import { FastifyInstance } from 'fastify';
 import { PolicyRepository } from '../database/PolicyRepository';
 import { PolicySchema } from '@ztag/shared';
-import { Logger } from '../utils/logger';
+import { logger as globalLogger } from '../utils/logger';
 
 export async function policyRoutes(fastify: FastifyInstance) {
-  const logger = new Logger('policies');
+  const logger = globalLogger.child({ route: 'policies' });
 
   // Get all policies
   fastify.get('/', async (request, reply) => {
     try {
       const policies = await PolicyRepository.findAll();
-      return { policies };
+      return reply.send(policies);
     } catch (error) {
-      logger.error('Failed to fetch policies', error);
-      reply.status(500);
-      return { error: 'Failed to fetch policies' };
+      logger.error({ err: error }, 'Failed to fetch policies');
+      return reply.status(500).send({ message: 'Internal Server Error' });
     }
   });
 
-  // Get policy by ID
+  // Get a single policy by ID
   fastify.get('/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
     try {
-      const { id } = request.params as { id: string };
       const policy = await PolicyRepository.findById(id);
-      
       if (!policy) {
-        reply.status(404);
-        return { error: 'Policy not found' };
+        return reply.status(404).send({ message: 'Policy not found' });
       }
-      
-      return { policy };
+      return reply.send(policy);
     } catch (error) {
-      logger.error('Failed to fetch policy', error);
-      reply.status(500);
-      return { error: 'Failed to fetch policy' };
+      logger.error({ err: error, policyId: id }, 'Failed to fetch policy');
+      return reply.status(500).send({ message: 'Internal Server Error' });
     }
   });
 
-  // Create new policy
-  fastify.post('/', async (request, reply) => {
+  // Create a new policy
+  fastify.post('/', {
+    schema: {
+      body: PolicySchema.omit({ id: true, createdAt: true, updatedAt: true }),
+    },
+  }, async (request, reply) => {
     try {
-      const policyData = PolicySchema.parse(request.body);
-      const policy = await PolicyRepository.create({
-        ...policyData,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString()
-      });
-      
-      logger.info('Policy created', { policyId: policy.id, name: policy.name });
-      reply.status(201);
-      return { policy };
+      const newPolicy = await PolicyRepository.create(request.body as any);
+      return reply.status(201).send(newPolicy);
     } catch (error) {
-      logger.error('Failed to create policy', error);
-      reply.status(400);
-      return { error: 'Invalid policy data' };
+      logger.error({ err: error, body: request.body }, 'Failed to create policy');
+      return reply.status(500).send({ message: 'Internal Server Error' });
     }
   });
 
-  // Update policy
-  fastify.put('/:id', async (request, reply) => {
+  // Update a policy
+  fastify.put('/:id', {
+    schema: {
+      body: PolicySchema.partial().omit({ id: true, createdAt: true, updatedAt: true }),
+    },
+  }, async (request, reply) => {
+    const { id } = request.params as { id: string };
     try {
-      const { id } = request.params as { id: string };
-      const updates = PolicySchema.partial().parse(request.body);
-      const policy = await PolicyRepository.update(id, updates);
-      
-      if (!policy) {
-        reply.status(404);
-        return { error: 'Policy not found' };
+      const updatedPolicy = await PolicyRepository.update(id, request.body as any);
+      if (!updatedPolicy) {
+        return reply.status(404).send({ message: 'Policy not found' });
       }
-      
-      logger.info('Policy updated', { policyId: policy.id });
-      return { policy };
+      return reply.send(updatedPolicy);
     } catch (error) {
-      logger.error('Failed to update policy', error);
-      reply.status(400);
-      return { error: 'Invalid policy data' };
+      logger.error({ err: error, policyId: id, body: request.body }, 'Failed to update policy');
+      return reply.status(500).send({ message: 'Internal Server Error' });
     }
   });
 
-  // Delete policy
+  // Delete a policy
   fastify.delete('/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
     try {
-      const { id } = request.params as { id: string };
-      const deleted = await PolicyRepository.delete(id);
-      
-      if (!deleted) {
-        reply.status(404);
-        return { error: 'Policy not found' };
+      const success = await PolicyRepository.delete(id);
+      if (!success) {
+        return reply.status(404).send({ message: 'Policy not found' });
       }
-      
-      logger.info('Policy deleted', { policyId: id });
-      reply.status(204);
+      return reply.status(204).send();
     } catch (error) {
-      logger.error('Failed to delete policy', error);
-      reply.status(500);
-      return { error: 'Failed to delete policy' };
+      logger.error({ err: error, policyId: id }, 'Failed to delete policy');
+      return reply.status(500).send({ message: 'Internal Server Error' });
     }
   });
 }
