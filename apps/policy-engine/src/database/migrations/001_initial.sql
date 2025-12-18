@@ -15,36 +15,37 @@ CREATE TABLE IF NOT EXISTS policies (
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
--- Audits table
+-- Audits table (Corrected Schema)
 CREATE TABLE IF NOT EXISTS audits (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     request_id VARCHAR(255) NOT NULL,
-    timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    subject_sub VARCHAR(255),
-    subject_role VARCHAR(100),
-    subject_tenant VARCHAR(100),
-    method VARCHAR(10) NOT NULL,
-    path TEXT NOT NULL,
+    timestamp TIMESTAMP WITH TIME ZONE NOT NULL,
     decision VARCHAR(10) NOT NULL,
     reason TEXT,
+    latency_ms INTEGER NOT NULL,
+    status_code INTEGER NOT NULL,
     policy_id UUID REFERENCES policies(id),
-    latency_ms INTEGER,
-    status_code INTEGER,
-    rate_limit_info JSONB,
-    ip VARCHAR(45),
-    user_agent TEXT,
+    subject JSONB,
+    resource JSONB,
+    context JSONB,
+    rate_limit JSONB,
+    error TEXT,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
 -- Indexes for performance
-CREATE INDEX IF NOT EXISTS idx_policies_service ON policies ((match_conditions->>'service'));
 CREATE INDEX IF NOT EXISTS idx_policies_priority ON policies (priority DESC);
 CREATE INDEX IF NOT EXISTS idx_policies_enabled ON policies (enabled);
+-- GIN index for efficient JSONB querying on match_conditions
+CREATE INDEX IF NOT EXISTS idx_policies_match_conditions ON policies USING GIN (match_conditions);
 
+
+-- GIN indexes for efficient JSONB querying on audits
 CREATE INDEX IF NOT EXISTS idx_audits_timestamp ON audits (timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_audits_decision ON audits (decision);
-CREATE INDEX IF NOT EXISTS idx_audits_subject ON audits (subject_sub);
-CREATE INDEX IF NOT EXISTS idx_audits_path ON audits (path);
+CREATE INDEX IF NOT EXISTS idx_audits_subject_sub ON audits USING GIN ((subject->'sub'));
+CREATE INDEX IF NOT EXISTS idx_audits_resource_service ON audits USING GIN ((resource->'service'));
+CREATE INDEX IF NOT EXISTS idx_audits_resource_path ON audits USING GIN ((resource->'path'));
 
 -- Function to update updated_at timestamp
 CREATE OR REPLACE FUNCTION update_updated_at_column()
@@ -65,31 +66,32 @@ INSERT INTO policies (name, enabled, priority, match_conditions, rules, obligati
     'Admin Full Access',
     true,
     100,
-    '{"service": "*", "pathPattern": "/*", "methods": ["*"]}',
-    '{"allowIf": [{"field": "role", "operator": "eq", "value": "admin"}]}',
+    '{ "service": "*", "pathPattern": "/*", "methods": ["*"] }',
+    '{ "allowIf": [{ "field": "subject.role", "operator": "eq", "value": "admin" }] }',
     '{}'
 ),
 (
     'User Echo Service Access',
     true,
     50,
-    '{"service": "echo-service", "pathPattern": "/echo/*", "methods": ["GET"]}',
-    '{"allowIf": [{"field": "role", "operator": "eq", "value": "user"}]}',
-    '{"rateLimit": {"limit": 10, "windowSeconds": 60}}'
+    '{ "service": "echo-service", "pathPattern": "/echo/*", "methods": ["GET"] }',
+    '{ "allowIf": [{ "field": "subject.role", "operator": "eq", "value": "user" }] }',
+    '{ "rateLimit": { "key": "subject.sub", "limit": 10, "windowSeconds": 60 } }'
+),
+(
+    'Tenant-Specific Echo Access',
+    true,
+    60,
+    '{ "service": "echo-service", "pathPattern": "/echo/*", "methods": ["*"], "tenant": "tenant-a" }',
+    '{ "allowIf": [{ "field": "subject.role", "operator": "in", "value": ["admin", "user"] }] }',
+    '{}'
 ),
 (
     'Blocked User Deny All',
     true,
     90,
-    '{"service": "*", "pathPattern": "/*", "methods": ["*"]}',
-    '{"denyIf": [{"field": "role", "operator": "eq", "value": "blocked"}]}',
+    '{ "service": "*", "pathPattern": "/*", "methods": ["*"] }',
+    '{ "denyIf": [{ "field": "subject.role", "operator": "eq", "value": "blocked" }] }',
     '{}'
-),
-(
-    'Default Deny All',
-    true,
-    1,
-    '{"service": "*", "pathPattern": "/*", "methods": ["*"]}',
-    '{"denyIf": []}',
-    '{}'
-) ON CONFLICT DO NOTHING;
+)
+ON CONFLICT (name) DO NOTHING;

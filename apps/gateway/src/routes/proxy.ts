@@ -1,179 +1,256 @@
-import { FastifyInstance } from 'fastify';
+import { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { JWTService } from '../services/JWTService';
 import { PolicyService } from '../services/PolicyService';
 import { RateLimitService } from '../services/RateLimitService';
 import { ProxyService } from '../services/ProxyService';
-import { RequestContextManager } from '../middleware/RequestContext';
-import { DecisionRequestSchema, DecisionResponseSchema } from '@ztag/shared';
-import { Logger } from '../utils/logger';
+import { AuditService } from '../services/AuditService';
+import { config } from '../config';
+import { logger } from '../utils/logger';
+import { APIError, AuditLog, DecisionRequest, JWTClaims, RateLimitResponse, RouteConfig } from '@ztag/shared';
+import { PrometheusService } from '../services/PrometheusService';
+import * as url from 'url';
 
-export async function proxyRoutes(fastify: FastifyInstance) {
-  const logger = new Logger('proxy');
+// Extend FastifyRequest to include our custom properties
+declare module 'fastify' {
+  interface FastifyRequest {
+    user?: JWTClaims;
+    audit: Omit<AuditLog, 'id' | 'timestamp'>; // Audit data collected throughout the request
+    routeConfig?: RouteConfig; // Matched route configuration
+    rawBody?: Buffer; // For raw body parsing
+  }
+  interface FastifyReply {
+    sendError: (code: string, message: string, statusCode: number, details?: Record<string, any>) => FastifyReply;
+  }
+}
 
-  // Main proxy route for API requests
-  fastify.all('/api/*', async (request, reply) => {
-    const startTime = Date.now();
-    const context = RequestContextManager.createContext();
-    
+export async function gatewayRoutes(fastify: FastifyInstance) {
+  // Decorate reply with a helper for consistent error responses
+  fastify.decorateReply('sendError', function (this: FastifyReply, code: string, message: string, statusCode: number, details?: Record<string, any>) {
+    PrometheusService.metrics.deniedRequestsTotal.inc({ code });
+    return this.status(statusCode).send({
+      error: {
+        code,
+        message,
+        requestId: this.request.id,
+        details,
+      },
+    });
+  });
+
+  // Health check endpoint
+  fastify.get('/health', async (request, reply) => {
     try {
-      // Extract JWT from Authorization header
-      const authHeader = request.headers['authorization'] as string;
+      // Basic checks for services gateway depends on
+      await redis.getClient(); // Check Redis connection
+      await db.query('SELECT 1'); // Check Postgres connection
+
+      // Optionally check Policy Engine
+      const policyEngineHealth = await fetch(`${config.policyEngineUrl}/health`);
+      if (!policyEngineHealth.ok) {
+        throw new Error('Policy Engine unhealthy');
+      }
+
+      reply.status(200).send({ status: 'ok', timestamp: new Date().toISOString() });
+    } catch (error) {
+      logger.error({ err: error, requestId: request.id }, 'Gateway health check failed');
+      reply.status(503).send({ status: 'error', message: 'Gateway unhealthy', error: (error as Error).message });
+    }
+  });
+
+  // Metrics endpoint for Prometheus
+  fastify.get('/metrics', async (request, reply) => {
+    const metrics = await PrometheusService.getMetrics();
+    reply.header('Content-Type', PrometheusService.getMetricsContentType()).send(metrics);
+  });
+
+
+  // Main proxy route for API requests to downstream services
+  fastify.all('/api/*', async (request, reply) => {
+    const startTime = process.hrtime.bigint(); // High-resolution time for latency
+    let statusCode: number = 500; // Default status code
+    let auditLogEntry: Omit<AuditLog, 'id' | 'timestamp'>;
+
+    // Initialize audit log structure
+    request.audit = {
+      requestId: request.id!,
+      subject: { sub: 'anonymous', role: 'anonymous' }, // Defaults, updated by JWT
+      resource: { service: 'unknown', path: request.url, method: request.method || 'UNKNOWN' },
+      context: { ip: request.ip || 'unknown', userAgent: request.headers['user-agent'] },
+      decision: 'DENY', // Default to DENY (zero-trust principle)
+      reason: 'Unhandled request',
+      latencyMs: 0,
+      statusCode: 500,
+    };
+
+    try {
+      PrometheusService.metrics.totalRequestsTotal.inc();
+
+      // 1. JWT Authentication
+      const authHeader = request.headers['authorization'];
       const token = JWTService.extractTokenFromHeader(authHeader);
-      
+
       if (!token) {
-        reply.status(401);
-        return {
-          error: {
-            code: 'MISSING_TOKEN',
-            message: 'Authorization token required',
-            requestId: context.requestId
-          }
-        };
+        request.audit.reason = 'Authorization token required';
+        return reply.sendError('MISSING_TOKEN', 'Authorization token required', 401);
       }
 
-      // Validate JWT and extract claims
-      const claims = JWTService.validateToken(token);
-      context.subject = claims;
-
-      // Determine target service based on path
-      const path = request.url;
-      let targetService = 'echo-service';
-      let targetUrl = '';
-
-      if (path.startsWith('/api/echo/')) {
-        targetService = 'echo-service';
-        targetUrl = 'http://localhost:7070';
-      } else {
-        reply.status(404);
-        return {
-          error: {
-            code: 'NO_ROUTE',
-            message: 'No route configured for this path',
-            requestId: context.requestId
-          }
-        };
+      let claims: JWTClaims;
+      try {
+        claims = JWTService.validateToken(token);
+        request.user = claims;
+        request.audit.subject = { sub: claims.sub, role: claims.role, tenant: claims.tenant };
+      } catch (error) {
+        request.audit.reason = `Invalid token: ${(error as Error).message}`;
+        return reply.sendError('INVALID_TOKEN', `Invalid token: ${(error as Error).message}`, 403);
       }
 
-      context.service = targetService;
-      context.path = path;
-      context.method = request.method;
+      // 2. Dynamic Routing
+      const matchedRoute = config.routeConfigs.find(route => {
+        // Match service based on pathPattern and method
+        const pathRegex = new RegExp(`^/api${route.pathPattern.replace(/\*/g, '.*').replace(/\//g, '\\/')}$`);
+        const methodMatches = route.methods.includes('*') || route.methods.includes(request.method || 'UNKNOWN');
+        return pathRegex.test(request.url) && methodMatches;
+      });
 
-      // Create decision request
-      const decisionRequest = {
+      if (!matchedRoute) {
+        request.audit.reason = 'No route configured for this path';
+        return reply.sendError('NO_ROUTE', 'No route configured for this path', 404);
+      }
+      request.routeConfig = matchedRoute;
+      request.audit.resource = {
+        service: matchedRoute.service,
+        path: request.url,
+        method: request.method || 'UNKNOWN',
+      };
+
+      // Path for downstream service (remove /api prefix)
+      const downstreamPath = request.url.substring(4); // Remove '/api'
+
+      // 3. Policy Evaluation
+      const decisionRequest: DecisionRequest = {
         subject: claims,
         resource: {
-          service: targetService,
-          path: path.replace('/api/', ''),
-          method: request.method
+          service: matchedRoute.service,
+          path: downstreamPath, // Path sent to Policy Engine should not have /api prefix
+          method: request.method || 'UNKNOWN',
         },
         context: {
-          ip: request.ip || 'unknown',
-          userAgent: request.headers['user-agent'] as string,
+          ip: request.ip,
+          userAgent: request.headers['user-agent'] || 'unknown',
           timestamp: new Date().toISOString(),
-          requestId: context.requestId,
-          tenant: claims.tenant
-        }
+          requestId: request.id!,
+          tenant: claims.tenant,
+        },
       };
 
-      // Evaluate policy
-      const decision = await PolicyService.evaluate(decisionRequest);
+      const decisionResponse = await PolicyService.evaluate(decisionRequest);
+      request.audit.decision = decisionResponse.decision;
+      request.audit.reason = decisionResponse.reason;
+      request.audit.policyId = decisionResponse.policyId;
 
-      if (decision.decision === 'DENY') {
-        const latency = Date.now() - startTime;
-        logger.warn('Request denied by policy', {
-          requestId: context.requestId,
-          subject: claims.sub,
-          path,
-          reason: decision.reason
-        });
+      if (decisionResponse.decision === 'DENY') {
+        return reply.sendError('ACCESS_DENIED', decisionResponse.reason, 403);
+      }
 
-        reply.status(403);
-        return {
-          error: {
-            code: 'ACCESS_DENIED',
-            message: decision.reason,
-            requestId: context.requestId
-          }
+      // 4. Rate Limiting (Obligation Enforcement)
+      let rateLimitInfo: RateLimitResponse | undefined;
+      if (decisionResponse.obligations?.rateLimit) {
+        const rlOptions = decisionResponse.obligations.rateLimit;
+        rateLimitInfo = await RateLimitService.checkRateLimit(
+          claims,
+          {
+            limit: rlOptions.limit,
+            windowSeconds: rlOptions.windowSeconds,
+            key: rlOptions.key,
+          },
+          request.id!
+        );
+
+        request.audit.rateLimit = {
+          key: rateLimitInfo.key,
+          limit: rateLimitInfo.limit,
+          remaining: rateLimitInfo.remaining,
+          reset: new Date(rateLimitInfo.resetTime).getTime() / 1000, // Unix timestamp
+          windowSeconds: rateLimitInfo.windowSeconds
         };
-      }
 
-      // Check rate limiting if obligations include rate limits
-      if (decision.obligations?.rateLimit) {
-        const rateLimitCheck = await RateLimitService.checkRateLimit(claims, {
-          limit: decision.obligations.rateLimit.limit,
-          windowSeconds: decision.obligations.rateLimit.windowSeconds,
-          key: decision.obligations.rateLimit.key
-        });
-
-        if (!rateLimitCheck.allowed) {
-          const latency = Date.now() - startTime;
-          logger.warn('Request rate limited', {
-            requestId: context.requestId,
-            subject: claims.sub,
-            path,
-            remaining: rateLimitCheck.remaining
+        if (!rateLimitInfo.allowed) {
+          PrometheusService.metrics.rateLimitedRequestsTotal.inc();
+          request.audit.reason = 'Rate limit exceeded';
+          return reply.sendError('RATE_LIMITED', 'Rate limit exceeded', 429, {
+            resetTime: rateLimitInfo.resetTime,
+            remaining: rateLimitInfo.remaining,
           });
-
-          reply.status(429);
-          return {
-            error: {
-              code: 'RATE_LIMITED',
-              message: 'Rate limit exceeded',
-              requestId: context.requestId,
-              details: {
-                resetTime: rateLimitCheck.resetTime,
-                remaining: rateLimitCheck.remaining
-              }
-            }
-          };
         }
       }
 
-      // Proxy request to downstream service
-      const proxyRequest = {
-        method: request.method,
-        path: path.replace('/api/', ''),
-        headers: request.headers as Record<string, string>,
-        body: request.body,
-        query: request.query
-      };
+      // 5. Proxy Request
+      const proxyResponse = await ProxyService.proxyRequest(
+        matchedRoute.targetUrl,
+        {
+          method: request.method!,
+          path: downstreamPath,
+          headers: request.headers as Record<string, string>,
+          body: request.rawBody, // Use raw body if available
+          query: request.query as Record<string, any>,
+        },
+        request.id!,
+        request.ip!,
+        matchedRoute.stripHeaders
+      );
 
-      const response = await ProxyService.proxyRequest(targetUrl, proxyRequest);
-      const latency = Date.now() - startTime;
+      statusCode = proxyResponse.statusCode;
+      request.audit.statusCode = statusCode;
 
-      logger.info('Request proxied successfully', {
-        requestId: context.requestId,
-        subject: claims.sub,
-        path,
-        statusCode: response.statusCode,
-        latency
-      });
-
-      // Set response headers and send response
-      reply.status(response.statusCode);
-      Object.entries(response.headers).forEach(([key, value]) => {
-        reply.header(key, value);
-      });
-
-      return response.body;
-    } catch (error) {
-      const latency = Date.now() - startTime;
-      logger.error('Proxy request failed', {
-        requestId: context.requestId,
-        error: error instanceof Error ? error.message : 'Unknown error',
-        latency
-      });
-
-      reply.status(500);
-      return {
-        error: {
-          code: 'PROXY_ERROR',
-          message: 'Internal proxy error',
-          requestId: context.requestId
+      reply.status(statusCode);
+      Object.entries(proxyResponse.headers).forEach(([key, value]) => {
+        // Avoid setting host header from downstream if already set by Fastify
+        if (key.toLowerCase() !== 'host') {
+          reply.header(key, value);
         }
-      };
+      });
+      return reply.send(proxyResponse.body);
+
+    } catch (error) {
+      logger.error({ err: error, requestId: request.id }, 'Gateway internal error');
+      request.audit.error = (error as Error).message;
+      statusCode = 500;
+      request.audit.statusCode = statusCode;
+      return reply.sendError('INTERNAL_GATEWAY_ERROR', 'An internal gateway error occurred', 500);
+
     } finally {
-      RequestContextManager.cleanupContext(context.requestId);
+      // Finalize and record audit log
+      const latency = Number(process.hrtime.bigint() - startTime) / 1_000_000; // convert nanoseconds to milliseconds
+      request.audit.latencyMs = latency;
+      request.audit.statusCode = statusCode; // Ensure final status code is recorded
+
+      // Only record audit log if claims were successfully extracted
+      if (request.user) {
+        AuditService.recordAudit(request.audit);
+      }
+      
+      // Update metrics
+      PrometheusService.metrics.requestDurationHistogram.observe(latency);
+      if (request.audit.decision === 'ALLOW') {
+        PrometheusService.metrics.allowedRequestsTotal.inc();
+      } else {
+        PrometheusService.metrics.deniedRequestsTotal.inc({ code: request.audit.reason });
+      }
     }
   });
 }
+
+// Utility to read raw body for proxying
+// This needs to be registered as a Fastify plugin in index.ts
+// import fp from 'fastify-plugin';
+// export const rawBodyPlugin = fp(async (fastify, opts, next) => {
+//   fastify.addContentTypeParser('*', (req, payload, done) => {
+//     let body = '';
+//     payload.on('data', chunk => { body += chunk; });
+//     payload.on('end', () => {
+//       req.rawBody = Buffer.from(body);
+//       done(null, body);
+//     });
+//     payload.on('error', done);
+//   });
+// });

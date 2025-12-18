@@ -4,7 +4,7 @@ import { z } from 'zod';
 export const JWTClaimsSchema = z.object({
   sub: z.string(), // User ID
   email: z.string().email(),
-  role: z.enum(['admin', 'user', 'blocked']),
+  role: z.string(), // Loosened from enum to allow flexibility
   tenant: z.string().optional(),
   scopes: z.array(z.string()).optional(),
   exp: z.number(),
@@ -14,26 +14,26 @@ export const JWTClaimsSchema = z.object({
 
 export type JWTClaims = z.infer<typeof JWTClaimsSchema>;
 
-// Policy Schemas
+// --- Policy Schemas (Corrected) ---
+
 export const PolicyConditionSchema = z.object({
-  field: z.string(), // e.g., 'role', 'email', 'scopes'
-  operator: z.enum(['equals', 'not_equals', 'in', 'not_in', 'contains', 'exists', 'not_exists']),
-  value: z.union([z.string(), z.array(z.string()), z.number(), z.boolean()]).optional()
+  field: z.string(), // e.g., 'subject.role', 'resource.path', 'context.ip'
+  operator: z.enum(['eq', 'neq', 'in', 'not_in', 'contains', 'starts_with', 'ends_with', 'gt', 'lt', 'gte', 'lte']),
+  value: z.any()
 });
 
 export type PolicyCondition = z.infer<typeof PolicyConditionSchema>;
 
-export const PolicyRuleSchema = z.object({
-  conditions: z.array(PolicyConditionSchema).default([]),
-  action: z.enum(['allow', 'deny']),
-  priority: z.number().default(100)
+export const PolicyRulesSchema = z.object({
+  allowIf: z.array(PolicyConditionSchema).optional(),
+  denyIf: z.array(PolicyConditionSchema).optional(),
 });
 
-export type PolicyRule = z.infer<typeof PolicyRuleSchema>;
+export type PolicyRules = z.infer<typeof PolicyRulesSchema>;
 
 export const PolicyObligationSchema = z.object({
   rateLimit: z.object({
-    key: z.string(),
+    key: z.string(), // Can use claim attributes like 'subject.sub' or 'context.ip'
     limit: z.number(),
     windowSeconds: z.number()
   }).optional(),
@@ -43,25 +43,30 @@ export const PolicyObligationSchema = z.object({
 
 export type PolicyObligation = z.infer<typeof PolicyObligationSchema>;
 
+export const PolicyMatchConditionsSchema = z.object({
+  service: z.string(),
+  pathPattern: z.string(), // e.g., /users/*
+  methods: z.array(z.string()).default(['*']), // *, GET, POST, etc.
+  tenant: z.string().optional()
+});
+
+export type PolicyMatchConditions = z.infer<typeof PolicyMatchConditionsSchema>;
+
 export const PolicySchema = z.object({
   id: z.string().uuid(),
   name: z.string(),
   enabled: z.boolean().default(true),
-  priority: z.number().default(100),
-  matchConditions: z.object({
-    service: z.string(),
-    pathPattern: z.string(),
-    methods: z.array(z.string()).default(['GET', 'POST', 'PUT', 'DELETE']),
-    tenant: z.string().optional()
-  }),
-  rules: z.array(PolicyRuleSchema),
-  obligations: PolicyObligationSchema.default({}),
-  version: z.number().default(1),
-  createdAt: z.string(),
-  updatedAt: z.string()
+  priority: z.number().int().default(100),
+  matchConditions: PolicyMatchConditionsSchema,
+  rules: PolicyRulesSchema,
+  obligations: PolicyObligationSchema.optional().default({}),
+  version: z.number().int().default(1),
+  createdAt: z.string(), // Should be a date-time string
+  updatedAt: z.string()  // Should be a date-time string
 });
 
 export type Policy = z.infer<typeof PolicySchema>;
+
 
 // Decision Request Schema
 export const DecisionRequestSchema = z.object({
@@ -86,37 +91,42 @@ export type DecisionRequest = z.infer<typeof DecisionRequestSchema>;
 export const DecisionResponseSchema = z.object({
   decision: z.enum(['ALLOW', 'DENY']),
   reason: z.string(),
-  policyId: z.string().optional(),
-  obligations: PolicyObligationSchema.default({})
+  policyId: z.string().uuid().optional(),
+  obligations: PolicyObligationSchema.optional().default({})
 });
 
 export type DecisionResponse = z.infer<typeof DecisionResponseSchema>;
 
 // Audit Log Schema
 export const AuditLogSchema = z.object({
-  id: z.string().uuid(),
+  id: z.string().uuid().optional(),
   requestId: z.string(),
   timestamp: z.string(),
-  subjectSub: z.string(),
-  role: z.string(),
-  tenant: z.string().optional(),
-  method: z.string(),
-  path: z.string(),
-  service: z.string(),
+  subject: z.object({
+    sub: z.string(),
+    role: z.string(),
+    tenant: z.string().optional(),
+  }),
+  resource: z.object({
+    service: z.string(),
+    path: z.string(),
+    method: z.string(),
+  }),
   decision: z.enum(['ALLOW', 'DENY']),
   reason: z.string(),
-  policyId: z.string().optional(),
+  policyId: z.string().uuid().optional(),
   latencyMs: z.number(),
   statusCode: z.number(),
-  rateLimitInfo: z.object({
-    key: z.string().optional(),
-    limit: z.number().optional(),
-    windowSeconds: z.number().optional(),
-    remaining: z.number().optional(),
-    resetTime: z.string().optional()
+  rateLimit: z.object({
+    key: z.string(),
+    limit: z.number(),
+    remaining: z.number(),
+    reset: z.number(),
   }).optional(),
-  ip: z.string(),
-  userAgent: z.string().optional(),
+  context: z.object({
+    ip: z.string(),
+    userAgent: z.string().optional(),
+  }),
   error: z.string().optional()
 });
 
