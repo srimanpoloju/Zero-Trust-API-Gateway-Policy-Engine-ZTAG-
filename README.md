@@ -55,7 +55,7 @@ ZTAG is a production-grade zero-trust API gateway that sits in front of downstre
 
 ### 1. Clone and Setup
 ```bash
-git clone <repository>
+git clone https://github.com/srimanpoloju/Zero-Trust-API-Gateway-Policy-Engine-ZTAG-.git
 cd ztag-platform
 cp .env.example .env
 ```
