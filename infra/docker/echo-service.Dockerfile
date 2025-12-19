@@ -1,4 +1,6 @@
-# Stage 0: Base dependencies for all apps
+# =========================
+# Base stage
+# =========================
 FROM node:18-alpine AS base
 
 ENV PNPM_HOME="/pnpm"
@@ -7,64 +9,59 @@ RUN corepack enable
 
 WORKDIR /app
 
-# Copy root pnpm config and lock file
-COPY package.json pnpm-workspace.yaml ./
-COPY pnpm-lock.yaml ./ # Copy if it exists
+# Root manifests
+COPY package.json pnpm-workspace.yaml tsconfig.base.json pnpm-lock.yaml ./
 
-# Install pnpm root dependencies
-RUN pnpm install --frozen-lockfile
+# Workspace package manifests (IMPORTANT)
+COPY packages/shared/package.json ./packages/shared/package.json
+COPY apps/echo-service/package.json ./apps/echo-service/package.json
+COPY apps/gateway/package.json ./apps/gateway/package.json
+COPY apps/policy-engine/package.json ./apps/policy-engine/package.json
+COPY apps/control-plane/package.json ./apps/control-plane/package.json
 
+# Install all workspace deps (zod included)
+RUN pnpm install
 
-# Stage 1: Builder for Production
+# =========================
+# Builder
+# =========================
 FROM base AS builder
-
 WORKDIR /app
 
-# Copy all application code
-COPY apps/echo-service ./apps/echo-service
 COPY packages/shared ./packages/shared
+COPY apps/echo-service ./apps/echo-service
 
-# Build shared package first
 WORKDIR /app/packages/shared
 RUN pnpm build
 
-# Build echo-service application
 WORKDIR /app/apps/echo-service
 RUN pnpm build
 
-
-# Stage 2: Production Runtime
+# =========================
+# Production
+# =========================
 FROM node:18-alpine AS production
-
 WORKDIR /app
 
-# Copy necessary files from builder stage
-COPY --from=builder /app/apps/echo-service/package.json ./package.json
 COPY --from=builder /app/apps/echo-service/dist ./dist
-COPY --from=builder /app/apps/echo-service/node_modules ./node_modules # Copy only production node_modules
+COPY --from=builder /app/apps/echo-service/package.json ./package.json
+COPY --from=builder /app/node_modules ./node_modules
 
-EXPOSE 7070
-
+EXPOSE 3003
 CMD ["node", "dist/index.js"]
 
-
-# Stage 3: Development Runtime
+# =========================
+# Development
+# =========================
 FROM base AS development
-
 WORKDIR /app
 
-# Copy source code for development (will be mounted by docker-compose)
-COPY apps/echo-service ./apps/echo-service
 COPY packages/shared ./packages/shared
+COPY apps/echo-service ./apps/echo-service
 
-# Build shared package
 WORKDIR /app/packages/shared
 RUN pnpm build
 
-# Set up echo-service for dev
 WORKDIR /app/apps/echo-service
-
-EXPOSE 7070
-
-# Run in development mode with watch
+EXPOSE 3003
 CMD ["pnpm", "dev"]

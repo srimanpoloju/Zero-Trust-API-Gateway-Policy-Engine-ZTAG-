@@ -1,70 +1,27 @@
-import Fastify from 'fastify';
-import { config } from './config';
-import { Logger } from './utils/logger';
+import Fastify from "fastify";
+import { fastifyLoggerOptions, logger } from "./utils/logger";
 
-const logger = new Logger('echo-service');
-
-async function buildServer() {
-  const fastify = Fastify({
-    logger: {
-      level: config.logLevel
-    }
-  });
-
-  // Echo endpoint - returns request data
-  fastify.get('/echo', async (request, reply) => {
-    return {
-      message: 'Echo service response',
-      timestamp: new Date().toISOString(),
-      request: {
-        method: request.method,
-        url: request.url,
-        headers: request.headers,
-        query: request.query,
-        params: request.params,
-        ip: request.ip
-      }
-    };
-  });
-
-  // Health endpoint
-  fastify.get('/health', async (request, reply) => {
-    return {
-      status: 'healthy',
-      timestamp: new Date().toISOString(),
-      service: 'echo-service',
-      version: '1.0.0'
-    };
-  });
-
-  return fastify;
-}
+const port = Number(process.env.ECHO_SERVICE_PORT || 7070);
+const host = "0.0.0.0";
 
 async function start() {
-  try {
-    const server = await buildServer();
-    
-    await server.listen({
-      host: config.host,
-      port: config.port
-    });
+  const app = Fastify({
+    logger: fastifyLoggerOptions, // ✅ pass options, not pino instance
+  });
 
-    logger.info(`Echo service running on ${config.host}:${config.port}`);
-  } catch (err) {
-    logger.error('Failed to start echo service', err);
-    process.exit(1);
-  }
+  app.get("/health", async () => ({ ok: true }));
+
+  app.get("/echo", async (request) => {
+    // Use your singleton logger if you want custom fields
+    logger.info({ query: request.query }, "Echo request received");
+    return { query: request.query };
+  });
+
+  await app.listen({ host, port });
+  logger.info(`Echo service running on http://${host}:${port}`);
 }
 
-// Graceful shutdown
-process.on('SIGINT', async () => {
-  logger.info('SIGINT received, shutting down gracefully');
-  process.exit(0);
+start().catch((err) => {
+  logger.error({ err }, "Echo service failed to start");
+  process.exit(1);
 });
-
-process.on('SIGTERM', async () => {
-  logger.info('SIGTERM received, shutting down gracefully');
-  process.exit(0);
-});
-
-start();

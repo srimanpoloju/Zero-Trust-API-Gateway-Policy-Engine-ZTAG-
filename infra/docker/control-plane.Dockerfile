@@ -1,4 +1,6 @@
-# Stage 0: Base dependencies for all apps
+# =========================
+# Base stage
+# =========================
 FROM node:18-alpine AS base
 
 ENV PNPM_HOME="/pnpm"
@@ -7,69 +9,56 @@ RUN corepack enable
 
 WORKDIR /app
 
-# Copy root pnpm config and lock file
-COPY package.json pnpm-workspace.yaml ./
-COPY pnpm-lock.yaml ./ # Copy if it exists
+COPY package.json pnpm-workspace.yaml tsconfig.base.json pnpm-lock.yaml ./
 
-# Install pnpm root dependencies
-# --frozen-lockfile is for CI/CD, can be removed for local dev flexibility
-RUN pnpm install --frozen-lockfile
+COPY packages/shared/package.json ./packages/shared/package.json
+COPY apps/control-plane/package.json ./apps/control-plane/package.json
+COPY apps/gateway/package.json ./apps/gateway/package.json
+COPY apps/echo-service/package.json ./apps/echo-service/package.json
+COPY apps/policy-engine/package.json ./apps/policy-engine/package.json
 
+RUN pnpm install
 
-# Stage 1: Builder for Production
+# =========================
+# Builder
+# =========================
 FROM base AS builder
-
 WORKDIR /app
 
-# Copy all application code
-COPY apps/control-plane ./apps/control-plane
 COPY packages/shared ./packages/shared
+COPY apps/control-plane ./apps/control-plane
 
-# Build shared package first
 WORKDIR /app/packages/shared
 RUN pnpm build
 
-# Build control-plane application
 WORKDIR /app/apps/control-plane
-# Next.js build needs NEXT_PUBLIC_ env vars during build time
-ARG NEXT_PUBLIC_POLICY_ENGINE_URL
-ENV NEXT_PUBLIC_POLICY_ENGINE_URL=${NEXT_PUBLIC_POLICY_ENGINE_URL}
-RUN pnpm build # This executes 'next build'
+RUN pnpm build
 
-
-# Stage 2: Production Runtime
+# =========================
+# Production
+# =========================
 FROM node:18-alpine AS production
-
 WORKDIR /app
 
-# Copy only the necessary files for production
-COPY --from=builder /app/apps/control-plane/.next ./.next
-COPY --from=builder /app/apps/control-plane/public ./public
+COPY --from=builder /app/apps/control-plane/dist ./dist
 COPY --from=builder /app/apps/control-plane/package.json ./package.json
-COPY --from=builder /app/apps/control-plane/node_modules ./node_modules # Copy built node_modules
+COPY --from=builder /app/node_modules ./node_modules
 
-EXPOSE 3000
+EXPOSE 3002
+CMD ["node", "dist/index.js"]
 
-CMD ["pnpm", "start"] # Executes 'next start'
-
-
-# Stage 3: Development Runtime
+# =========================
+# Development
+# =========================
 FROM base AS development
-
 WORKDIR /app
 
-# Copy source code for development (will be mounted by docker-compose)
-COPY apps/control-plane ./apps/control-plane
 COPY packages/shared ./packages/shared
+COPY apps/control-plane ./apps/control-plane
 
-# Build shared package
 WORKDIR /app/packages/shared
 RUN pnpm build
 
-# Set up control-plane for dev
 WORKDIR /app/apps/control-plane
-
-EXPOSE 3000
-
-# Next.js dev server should be run with watch
+EXPOSE 3002
 CMD ["pnpm", "dev"]

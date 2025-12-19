@@ -1,4 +1,6 @@
-# Stage 0: Base dependencies for all apps
+# =========================
+# Base stage
+# =========================
 FROM node:18-alpine AS base
 
 ENV PNPM_HOME="/pnpm"
@@ -7,64 +9,56 @@ RUN corepack enable
 
 WORKDIR /app
 
-# Copy root pnpm config and lock file
-COPY package.json pnpm-workspace.yaml ./
-COPY pnpm-lock.yaml ./ # Copy if it exists
+COPY package.json pnpm-workspace.yaml tsconfig.base.json pnpm-lock.yaml ./
 
-# Install pnpm root dependencies
-RUN pnpm install --frozen-lockfile
+COPY packages/shared/package.json ./packages/shared/package.json
+COPY apps/policy-engine/package.json ./apps/policy-engine/package.json
+COPY apps/gateway/package.json ./apps/gateway/package.json
+COPY apps/echo-service/package.json ./apps/echo-service/package.json
+COPY apps/control-plane/package.json ./apps/control-plane/package.json
 
+RUN pnpm install
 
-# Stage 1: Builder for Production
+# =========================
+# Builder
+# =========================
 FROM base AS builder
-
 WORKDIR /app
 
-# Copy all application code
-COPY apps/policy-engine ./apps/policy-engine
 COPY packages/shared ./packages/shared
+COPY apps/policy-engine ./apps/policy-engine
 
-# Build shared package first
 WORKDIR /app/packages/shared
 RUN pnpm build
 
-# Build policy-engine application
 WORKDIR /app/apps/policy-engine
 RUN pnpm build
 
-
-# Stage 2: Production Runtime
+# =========================
+# Production
+# =========================
 FROM node:18-alpine AS production
-
 WORKDIR /app
 
-# Copy necessary files from builder stage
-COPY --from=builder /app/apps/policy-engine/package.json ./package.json
 COPY --from=builder /app/apps/policy-engine/dist ./dist
-COPY --from=builder /app/apps/policy-engine/node_modules ./node_modules # Copy only production node_modules
+COPY --from=builder /app/apps/policy-engine/package.json ./package.json
+COPY --from=builder /app/node_modules ./node_modules
 
-EXPOSE 4000 # Corrected port
-
+EXPOSE 4000
 CMD ["node", "dist/index.js"]
 
-
-# Stage 3: Development Runtime
+# =========================
+# Development
+# =========================
 FROM base AS development
-
 WORKDIR /app
 
-# Copy source code for development (will be mounted by docker-compose)
-COPY apps/policy-engine ./apps/policy-engine
 COPY packages/shared ./packages/shared
+COPY apps/policy-engine ./apps/policy-engine
 
-# Build shared package
 WORKDIR /app/packages/shared
 RUN pnpm build
 
-# Set up policy-engine for dev
 WORKDIR /app/apps/policy-engine
-
-EXPOSE 4000 # Corrected port
-
-# Run in development mode with watch
+EXPOSE 4000
 CMD ["pnpm", "dev"]

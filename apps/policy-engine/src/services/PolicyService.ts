@@ -1,5 +1,5 @@
 import { PolicyRepository } from '../database/PolicyRepository';
-import type { Policy, DecisionRequest, DecisionResponse, PolicyCondition, PolicyRules } from '@ztag/shared';
+import type { Policy, DecisionRequest, DecisionResponse, PolicyCondition } from '@ztag/shared';
 import { logger } from '../utils/logger';
 
 type EvaluationResult = 'ALLOW' | 'DENY' | 'SKIP';
@@ -9,12 +9,32 @@ type EvaluationResult = 'ALLOW' | 'DENY' | 'SKIP';
  */
 export class PolicyService {
   /**
+   * Helper to build a DecisionResponse with obligations always present.
+   */
+  private static makeDecisionResponse(params: {
+    decision: 'ALLOW' | 'DENY';
+    reason: string;
+    policyId?: string;
+    obligations?: DecisionResponse['obligations'];
+  }): DecisionResponse {
+    return {
+      decision: params.decision,
+      reason: params.reason,
+      policyId: params.policyId,
+      obligations: params.obligations ?? {},
+    };
+  }
+
+  /**
    * Main evaluation entry point.
    * Orchestrates fetching policies and evaluating them in order.
    */
   static async evaluate(request: DecisionRequest): Promise<DecisionResponse> {
-    logger.info({ requestId: request.context.requestId, resource: request.resource }, 'Starting policy evaluation');
-    
+    logger.info(
+      { requestId: request.context.requestId, resource: request.resource },
+      'Starting policy evaluation'
+    );
+
     try {
       const policies = await PolicyRepository.findMatchingPolicies(
         request.resource.service,
@@ -25,35 +45,47 @@ export class PolicyService {
 
       if (policies.length === 0) {
         logger.warn({ requestId: request.context.requestId }, 'No matching policy found');
-        return { decision: 'DENY', reason: 'No matching policy found' };
+        return this.makeDecisionResponse({
+          decision: 'DENY',
+          reason: 'No matching policy found',
+        });
       }
 
-      logger.info({ requestId: request.context.requestId, count: policies.length }, 'Found candidate policies');
+      logger.info(
+        { requestId: request.context.requestId, count: policies.length },
+        'Found candidate policies'
+      );
 
       // Evaluate policies in order of priority
       for (const policy of policies) {
         const { result, reason } = this.evaluatePolicyRules(request, policy);
-        
+
         if (result !== 'SKIP') {
-          logger.info({ requestId: request.context.requestId, policyId: policy.id, decision: result }, `Decision reached by policy: ${policy.name}`);
-          return {
+          logger.info(
+            { requestId: request.context.requestId, policyId: policy.id, decision: result },
+            `Decision reached by policy: ${policy.name}`
+          );
+
+          return this.makeDecisionResponse({
             decision: result,
             reason: reason || `Decision by policy: ${policy.name}`,
             policyId: policy.id,
             obligations: policy.obligations || {},
-          };
+          });
         }
       }
 
       logger.warn({ requestId: request.context.requestId }, 'All matching policies were inconclusive');
-      return { decision: 'DENY', reason: 'No policy rule produced an explicit decision' };
-
+      return this.makeDecisionResponse({
+        decision: 'DENY',
+        reason: 'No policy rule produced an explicit decision',
+      });
     } catch (error) {
       logger.error({ requestId: request.context.requestId, error }, 'An error occurred during policy evaluation');
-      return {
+      return this.makeDecisionResponse({
         decision: 'DENY',
         reason: `Policy evaluation error: ${error instanceof Error ? error.message : 'Unknown error'}`,
-      };
+      });
     }
   }
 
@@ -61,7 +93,10 @@ export class PolicyService {
    * Evaluates the 'denyIf' and 'allowIf' rules for a single policy.
    * Deny rules are always evaluated first and take precedence.
    */
-  private static evaluatePolicyRules(request: DecisionRequest, policy: Policy): { result: EvaluationResult, reason?: string } {
+  private static evaluatePolicyRules(
+    request: DecisionRequest,
+    policy: Policy
+  ): { result: EvaluationResult; reason?: string } {
     const { rules } = policy;
 
     // 1. Check deny rules first
@@ -77,11 +112,11 @@ export class PolicyService {
         return { result: 'ALLOW', reason: `Allowed by policy: ${policy.name}` };
       }
     }
-    
+
     // 3. If no rules produced a decision, skip to the next policy
     return { result: 'SKIP' };
   }
-  
+
   /**
    * Checks if any set of conditions in a list matches the request.
    * Used for 'allowIf' and 'denyIf' which can be arrays of condition sets.
@@ -99,7 +134,7 @@ export class PolicyService {
     if (!conditions || conditions.length === 0) {
       return true; // An empty rule set is considered a match
     }
-    return conditions.every(condition => this.evaluateCondition(request, condition));
+    return conditions.every((condition) => this.evaluateCondition(request, condition));
   }
 
   /**

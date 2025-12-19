@@ -1,0 +1,12 @@
+**/node_modules
+**/dist
+**/.turbo
+**/.next
+**/coverage
+**/.DS_Store
+.git
+.gitignore
+.env
+.env.*
+npm-debug.log*
+pnpm-debug.log*

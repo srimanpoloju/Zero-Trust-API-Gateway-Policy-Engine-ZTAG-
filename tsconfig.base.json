@@ -1,8 +1,8 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "module": "ESNext", // Changed from commonjs
-    "lib": ["ES2022", "DOM", "DOM.Iterable"], // Added DOM and DOM.Iterable
+    "module": "ESNext",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
@@ -13,7 +13,7 @@
     "resolveJsonModule": true,
     "experimentalDecorators": true,
     "emitDecoratorMetadata": true,
-    "moduleResolution": "bundler", // Changed from node
+    "moduleResolution": "node",
     "allowSyntheticDefaultImports": true,
     "baseUrl": ".",
     "paths": {

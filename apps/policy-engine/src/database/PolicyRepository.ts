@@ -3,17 +3,6 @@ import type { Policy } from '@ztag/shared';
 
 // The PolicyRepository is responsible for all database interactions related to policies.
 export class PolicyRepository {
-  /**
-   * Finds all policies that could potentially match a given request.
-   * This query intentionally fetches a broader set of policies (by service and tenant)
-   * which are then filtered more precisely in memory.
-   *
-   * @param service The name of the downstream service.
-   * @param path The request path.
-   * @param method The HTTP method.
-   * @param tenant An optional tenant identifier.
-   * @returns A promise that resolves to an array of matching policies, sorted by priority.
-   */
   static async findMatchingPolicies(service: string, path: string, method: string, tenant?: string): Promise<Policy[]> {
     const query = `
       SELECT * FROM policies
@@ -31,8 +20,6 @@ export class PolicyRepository {
     const result = await db.query(query, [service, tenant || null]);
     const policies = result.rows.map(row => this.mapToPolicy(row));
 
-    // In-memory filtering for path pattern and methods, which is more flexible
-    // than doing complex regex and array lookups in SQL across all DB types.
     return policies.filter(policy => {
       const { pathPattern, methods } = policy.matchConditions;
 
@@ -41,12 +28,10 @@ export class PolicyRepository {
 
       const pathMatches = this.matchesPath(pathPattern, path);
       if (!pathMatches) return false;
-      
+
       return true;
     });
   }
-
-  // --- Standard CRUD methods for the Control Plane ---
 
   static async findAll(): Promise<Policy[]> {
     const query = 'SELECT * FROM policies ORDER BY priority DESC, name ASC';
@@ -59,7 +44,7 @@ export class PolicyRepository {
     const result = await db.query(query, [id]);
     return result.rows.length > 0 ? this.mapToPolicy(result.rows[0]) : null;
   }
-  
+
   static async create(policy: Omit<Policy, 'id' | 'createdAt' | 'updatedAt'>): Promise<Policy> {
     const query = `
       INSERT INTO policies (name, enabled, priority, match_conditions, rules, obligations, version)
@@ -112,15 +97,9 @@ export class PolicyRepository {
   static async delete(id: string): Promise<boolean> {
     const query = 'DELETE FROM policies WHERE id = $1';
     const result = await db.query(query, [id]);
-    return result.rowCount > 0;
+    return (result.rowCount ?? 0) > 0;
   }
 
-  /**
-   * Converts a wildcard path pattern into a regular expression for matching.
-   * @param pattern The wildcard pattern (e.g., '/users/*').
-   * @param path The actual request path to test.
-   * @returns True if the path matches the pattern.
-   */
   private static matchesPath(pattern: string, path: string): boolean {
     if (pattern === '/*') pattern = '*';
     if (pattern === '*') return true;
@@ -129,12 +108,6 @@ export class PolicyRepository {
     return regex.test(path);
   }
 
-  /**
-   * Maps a raw database row to a structured Policy object.
-   * Handles JSON parsing for nested objects.
-   * @param row The raw row from the 'pg' driver.
-   * @returns A Policy object.
-   */
   private static mapToPolicy(row: any): Policy {
     return {
       id: row.id,

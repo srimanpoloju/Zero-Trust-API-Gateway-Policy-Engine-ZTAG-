@@ -1,4 +1,4 @@
-version: '3.8'
+version: "3.8"
 
 services:
   postgres:
@@ -6,17 +6,18 @@ services:
     container_name: ztag-postgres
     environment:
       POSTGRES_DB: ztag_db
-      POSTGRES_USER: ztag_user # Updated user
-      POSTGRES_PASSWORD: ztag_password # Updated password
+      POSTGRES_USER: ztag_user
+      POSTGRES_PASSWORD: ztag_password
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ztag_user -d ztag_db"] # Updated user
-      interval: 5s # Shorter interval for faster startup
+      test: ["CMD-SHELL", "pg_isready -U ztag_user -d ztag_db -h localhost || exit 1"]
+      interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 20
+      start_period: 10s
 
   redis:
     image: redis:7-alpine
@@ -27,53 +28,61 @@ services:
       - redis_data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
-      interval: 5s # Shorter interval for faster startup
+      interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 20
+      start_period: 5s
 
   policy-engine:
     build:
       context: .
       dockerfile: infra/docker/policy-engine.Dockerfile
-      target: development # Use development target for faster local builds
+      target: development
     container_name: ztag-policy-engine
     environment:
       - DATABASE_URL=postgresql://ztag_user:ztag_password@postgres:5432/ztag_db
       - JWT_SECRET=super-secret-jwt-key-change-in-production
-      - POLICY_ENGINE_PORT=4000 # Updated port
-      - LOG_LEVEL=debug # Changed to debug for dev environment
+      - POLICY_ENGINE_PORT=4000
+      - LOG_LEVEL=debug
       - NODE_ENV=development
     ports:
-      - "4000:4000" # Updated port
+      - "4000:4000"
     depends_on:
       postgres:
         condition: service_healthy
     volumes:
       - ./apps/policy-engine:/app/apps/policy-engine
       - ./packages/shared:/app/packages/shared
-      - /app/apps/policy-engine/node_modules # Anonymous volume
-    command: pnpm dev # Start in development mode with watch
-    # Healthcheck for policy-engine (optional, can be added after initial setup)
+      - /app/apps/policy-engine/node_modules
+      - /app/packages/shared/node_modules
+      - /app/node_modules
+    command: sh -c "pnpm -C /app/packages/shared build && pnpm -C /app/apps/policy-engine dev"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:4000/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+      # no curl/wget dependency; works on node image always
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"require('http').get('http://127.0.0.1:4000/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))\""
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
 
   gateway:
     build:
       context: .
       dockerfile: infra/docker/gateway.Dockerfile
-      target: development # Use development target
+      target: development
     container_name: ztag-gateway
     environment:
       - DATABASE_URL=postgresql://ztag_user:ztag_password@postgres:5432/ztag_db
       - REDIS_URL=redis://redis:6379
-      - JWT_SECRET=super-secret-jwt-key-change-in-production,another-secret # Comma-separated
+      - JWT_SECRET=super-secret-jwt-key-change-in-production,another-secret
       - GATEWAY_PORT=3001
-      - POLICY_ENGINE_URL=http://policy-engine:4000 # Updated port
+      - POLICY_ENGINE_URL=http://policy-engine:4000
       - ECHO_SERVICE_URL=http://echo-service:7070
-      - LOG_LEVEL=debug # Changed to debug for dev environment
+      - LOG_LEVEL=debug
       - NODE_ENV=development
     ports:
       - "3001:3001"
@@ -83,67 +92,88 @@ services:
       redis:
         condition: service_healthy
       policy-engine:
-        condition: service_healthy # Wait for policy-engine to be healthy
+        condition: service_healthy
     volumes:
       - ./apps/gateway:/app/apps/gateway
       - ./packages/shared:/app/packages/shared
-      - /app/apps/gateway/node_modules # Anonymous volume
-    command: pnpm dev # Start in development mode with watch
+      - /app/apps/gateway/node_modules
+      - /app/packages/shared/node_modules
+      - /app/node_modules
+    command: sh -c "pnpm -C /app/packages/shared build && pnpm -C /app/apps/gateway dev"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3001/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"require('http').get('http://127.0.0.1:3001/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))\""
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
 
   control-plane:
     build:
       context: .
       dockerfile: infra/docker/control-plane.Dockerfile
-      target: development # Use development target
+      target: development
     container_name: ztag-control-plane
     environment:
-      - NEXT_PUBLIC_POLICY_ENGINE_URL=http://localhost:4000 # Publicly accessible URL for browser
+      - NEXT_PUBLIC_POLICY_ENGINE_URL=http://localhost:4000
       - CONTROL_PLANE_PORT=3000
       - NODE_ENV=development
     ports:
       - "3000:3000"
     depends_on:
       policy-engine:
-        condition: service_healthy # Wait for policy-engine to be healthy
+        condition: service_healthy
     volumes:
       - ./apps/control-plane:/app/apps/control-plane
       - ./packages/shared:/app/packages/shared
-      - /app/apps/control-plane/node_modules # Anonymous volume
-    command: pnpm dev
+      - /app/apps/control-plane/node_modules
+      - /app/packages/shared/node_modules
+      - /app/node_modules
+    command: sh -c "pnpm -C /app/packages/shared build && pnpm -C /app/apps/control-plane dev"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3000"] # Check if UI is reachable
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    tty: true # Keep container running for dev server
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"require('http').get('http://127.0.0.1:3000',r=>process.exit(r.statusCode>=200 && r.statusCode<500 ? 0 : 1)).on('error',()=>process.exit(1))\""
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
+    tty: true
 
   echo-service:
     build:
       context: .
       dockerfile: infra/docker/echo-service.Dockerfile
-      target: development # Use development target
+      target: development
     container_name: ztag-echo-service
     environment:
       - ECHO_SERVICE_PORT=7070
-      - LOG_LEVEL=debug # Changed to debug for dev environment
+      - LOG_LEVEL=debug
       - NODE_ENV=development
     ports:
       - "7070:7070"
     volumes:
       - ./apps/echo-service:/app/apps/echo-service
       - ./packages/shared:/app/packages/shared
-      - /app/apps/echo-service/node_modules # Anonymous volume
-    command: pnpm dev # Start in development mode with watch
+      - /app/apps/echo-service/node_modules
+      - /app/packages/shared/node_modules
+      - /app/node_modules
+    command: sh -c "pnpm -C /app/packages/shared build && pnpm -C /app/apps/echo-service dev"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:7070/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"require('http').get('http://127.0.0.1:7070/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))\""
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
 
 volumes:
   postgres_data:

@@ -1,13 +1,15 @@
-import pino from 'pino';
-import { config } from '../config';
+import pino from "pino";
+
+const level =
+  process.env.LOG_LEVEL ||
+  process.env.PINO_LEVEL ||
+  "info";
 
 export const logger = pino({
-  level: config.logLevel,
-  transport: {
-    target: 'pino-pretty',
-    options: {
-      colorize: true,
-      ignore: 'pid,hostname',
-    },
-  },
+  level,
+  timestamp: pino.stdTimeFunctions.isoTime,
 });
+
+export const fastifyLoggerOptions = {
+  level,
+} as const;
